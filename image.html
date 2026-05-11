@@ -456,7 +456,7 @@ footer.bot {
 }
 .lena-frame canvas {
   width: 100%; height: 100%;
-  image-rendering: pixelated; image-rendering: -moz-crisp-edges;
+  image-rendering: auto;
   display: block;
 }
 .lena-frame::after {
@@ -893,8 +893,7 @@ footer.bot {
 }
 .img-frame canvas {
   width: 100%; height: 100%;
-  image-rendering: pixelated;
-  image-rendering: -moz-crisp-edges;
+  image-rendering: auto;
   display: block;
 }
 .img-pill {
@@ -1537,13 +1536,13 @@ function idct1D(X) {
   return x;
 }
 function dct2D(M, w, h) {
-  const tmp = new Float32Array(w * h);
+  const tmp = new Float64Array(w * h);
   for (let y = 0; y < h; y++) {
     const row = []; for (let x = 0; x < w; x++) row.push(M[y * w + x]);
     const R = dct1D(row);
     for (let x = 0; x < w; x++) tmp[y * w + x] = R[x];
   }
-  const out = new Float32Array(w * h);
+  const out = new Float64Array(w * h);
   for (let x = 0; x < w; x++) {
     const col = []; for (let y = 0; y < h; y++) col.push(tmp[y * w + x]);
     const C = dct1D(col);
@@ -1552,13 +1551,13 @@ function dct2D(M, w, h) {
   return out;
 }
 function idct2D(M, w, h) {
-  const tmp = new Float32Array(w * h);
+  const tmp = new Float64Array(w * h);
   for (let y = 0; y < h; y++) {
     const row = []; for (let x = 0; x < w; x++) row.push(M[y * w + x]);
     const R = idct1D(row);
     for (let x = 0; x < w; x++) tmp[y * w + x] = R[x];
   }
-  const out = new Float32Array(w * h);
+  const out = new Float64Array(w * h);
   for (let x = 0; x < w; x++) {
     const col = []; for (let y = 0; y < h; y++) col.push(tmp[y * w + x]);
     const C = idct1D(col);
@@ -1566,56 +1565,99 @@ function idct2D(M, w, h) {
   }
   return out;
 }
-function topSingularValue(matrix, rows, cols, iters) {
-  iters = iters || 25;
-  let v = new Array(cols).fill(0).map(() => Math.random());
-  let n0 = Math.sqrt(v.reduce((a, b) => a + b * b, 0));
-  v = v.map(x => x / n0);
-  for (let it = 0; it < iters; it++) {
-    const u = new Array(rows).fill(0);
-    for (let i = 0; i < rows; i++) { let s = 0; for (let j = 0; j < cols; j++) s += matrix[i * cols + j] * v[j]; u[i] = s; }
-    const un = Math.sqrt(u.reduce((a, b) => a + b * b, 0)) || 1;
-    const uh = u.map(x => x / un);
-    const v2 = new Array(cols).fill(0);
-    for (let j = 0; j < cols; j++) { let s = 0; for (let i = 0; i < rows; i++) s += matrix[i * cols + j] * uh[i]; v2[j] = s; }
-    const vn = Math.sqrt(v2.reduce((a, b) => a + b * b, 0)) || 1;
-    v = v2.map(x => x / vn);
+/* Truncated SVD via deflated power iteration — returns {U, S, V} for rank-k */
+function truncatedSVD(matrix, rows, cols, rank) {
+  rank = Math.min(rank || Math.min(rows, cols), Math.min(rows, cols));
+  const U = [], S = [], V = [];
+  const R = new Float64Array(matrix.length);
+  for (let i = 0; i < matrix.length; i++) R[i] = matrix[i];
+  for (let r = 0; r < rank; r++) {
+    let v = new Float64Array(cols);
+    for (let j = 0; j < cols; j++) v[j] = Math.random() - 0.5;
+    let vn = Math.sqrt(v.reduce((a, b) => a + b * b, 0)) || 1;
+    for (let j = 0; j < cols; j++) v[j] /= vn;
+    let u = new Float64Array(rows), sigma = 0;
+    for (let it = 0; it < 20; it++) {
+      u.fill(0);
+      for (let i = 0; i < rows; i++) { let s = 0; for (let j = 0; j < cols; j++) s += R[i * cols + j] * v[j]; u[i] = s; }
+      const un = Math.sqrt(u.reduce((a, b) => a + b * b, 0)) || 1e-30;
+      for (let i = 0; i < rows; i++) u[i] /= un;
+      v.fill(0);
+      for (let j = 0; j < cols; j++) { let s = 0; for (let i = 0; i < rows; i++) s += R[i * cols + j] * u[i]; v[j] = s; }
+      sigma = Math.sqrt(v.reduce((a, b) => a + b * b, 0)) || 1e-30;
+      for (let j = 0; j < cols; j++) v[j] /= sigma;
+    }
+    U.push(u); S.push(sigma); V.push(v);
+    for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) R[i * cols + j] -= sigma * u[i] * v[j];
   }
-  let sigma = 0;
-  for (let i = 0; i < rows; i++) { let s = 0; for (let j = 0; j < cols; j++) s += matrix[i * cols + j] * v[j]; sigma += s * s; }
-  return Math.sqrt(sigma);
+  return { U, S, V, rank };
 }
-function dctSvdEnhance(gray, w, h, alphaBoost) {
-  alphaBoost = alphaBoost || 1.0;
-  const stride = Math.max(1, Math.floor(w / 64));
-  const sw = Math.floor(w / stride), sh = Math.floor(h / stride);
-  const downI = new Float32Array(sw * sh);
-  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) downI[y * sw + x] = gray[y * stride * w + x * stride] / 255;
-  const ghe1 = ghe(new Uint8ClampedArray(downI.map(v => Math.round(v * 255))));
-  const downG = new Float32Array(sw * sh);
-  for (let i = 0; i < ghe1.length; i++) downG[i] = ghe1[i] / 255;
-  const D_I = dct2D(downI, sw, sh), D_G = dct2D(downG, sw, sh);
-  const hM = Math.floor(sh / 2), hN = Math.floor(sw / 2);
-  const B1_I = new Float32Array(hM * hN), B1_G = new Float32Array(hM * hN);
+/* Reconstruct matrix from SVD components with modified singular values */
+function svdReconstruct(U, S, V, rows, cols) {
+  const out = new Float64Array(rows * cols);
+  for (let r = 0; r < S.length; r++) {
+    const s = S[r];
+    for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) out[i * cols + j] += s * U[r][i] * V[r][j];
+  }
+  return out;
+}
+
+/* ── Lab 3 cache: store expensive DCT + SVD so sliders are instant ── */
+let _lab3Cache = null;
+
+function dctSvdPrepare(gray, w, h) {
+  /* Only re-run when the source image changes */
+  const imgF = new Float64Array(w * h);
+  for (let i = 0; i < w * h; i++) imgF[i] = gray[i] / 255.0;
+  const gheU8 = ghe(gray);
+  const gheF = new Float64Array(w * h);
+  for (let i = 0; i < w * h; i++) gheF[i] = gheU8[i] / 255.0;
+  const D_I = dct2D(imgF, w, h);
+  const D_G = dct2D(gheF, w, h);
+  const hM = Math.floor(h / 2), hN = Math.floor(w / 2);
+  const B1_I = new Float64Array(hM * hN), B1_G = new Float64Array(hM * hN);
   for (let y = 0; y < hM; y++) for (let x = 0; x < hN; x++) {
-    B1_I[y * hN + x] = D_I[y * sw + x];
-    B1_G[y * hN + x] = D_G[y * sw + x];
+    B1_I[y * hN + x] = D_I[y * w + x];
+    B1_G[y * hN + x] = D_G[y * w + x];
   }
-  const sigI = topSingularValue(B1_I, hM, hN), sigG = topSingularValue(B1_G, hM, hN);
-  const xi = sigG / (sigI || 1);
-  const alpha = 0.25 * (xi + 1 / xi) * alphaBoost;
-  const ratio = (alpha * (xi * sigI + (1 / xi) * sigG)) / (sigI || 1);
-  const D_new = new Float32Array(sw * sh);
-  for (let i = 0; i < sw * sh; i++) D_new[i] = D_I[i];
-  for (let y = 0; y < hM; y++) for (let x = 0; x < hN; x++) D_new[y * sw + x] = D_I[y * sw + x] * ratio;
-  const enhSmall = idct2D(D_new, sw, sh);
+  /* Full-rank SVD (we compute max rank once, then can truncate cheaply) */
+  const maxK = Math.min(hM, hN);
+  const svdI = truncatedSVD(B1_I, hM, hN, maxK);
+  const svdG = truncatedSVD(B1_G, hM, hN, maxK);
+  return { D_I, gheU8, hM, hN, w, h, svdI, svdG, maxK };
+}
+
+function dctSvdEnhance(gray, w, h, alphaBoost, svdRank) {
+  alphaBoost = alphaBoost || 1.0;
+  svdRank = svdRank || 0;
+  /* Use cache if source hasn't changed */
+  if (!_lab3Cache || _lab3Cache.w !== w || _lab3Cache.h !== h || _lab3Cache._srcId !== gray) {
+    _lab3Cache = dctSvdPrepare(gray, w, h);
+    _lab3Cache._srcId = gray;
+  }
+  const c = _lab3Cache;
+  const { D_I, gheU8, hM, hN, svdI, svdG, maxK } = c;
+  const k = svdRank > 0 ? Math.min(svdRank, maxK) : maxK;
+  /* xi from top singular value */
+  const xi = (svdG.S[0] || 1e-30) / (svdI.S[0] || 1e-30);
+  const alpha = 0.25 * (xi + 1.0 / xi) * alphaBoost;
+  /* Build S_new using only first k singular values */
+  const S_new = [];
+  const numSV = Math.min(k, svdI.S.length, svdG.S.length);
+  for (let i = 0; i < numSV; i++) {
+    S_new.push(alpha * (xi * svdI.S[i] + (1.0 / xi) * svdG.S[i]));
+  }
+  /* B1_new = U_I[:k] * S_new * V_I[:k]' */
+  const B1_new = svdReconstruct(svdI.U.slice(0, k), S_new, svdI.V.slice(0, k), hM, hN);
+  /* Rebuild full DCT: [B1_new B2; B3 B4] */
+  const D_enh = new Float64Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) D_enh[y * w + x] = D_I[y * w + x];
+  for (let y = 0; y < hM; y++) for (let x = 0; x < hN; x++) D_enh[y * w + x] = B1_new[y * hN + x];
+  /* IDCT on full matrix */
+  const enhF = idct2D(D_enh, w, h);
   const out = new Uint8ClampedArray(w * h);
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const sx = Math.min(sw - 1, Math.floor(x / stride));
-    const sy = Math.min(sh - 1, Math.floor(y / stride));
-    out[y * w + x] = Math.max(0, Math.min(255, Math.round(enhSmall[sy * sw + sx] * 255)));
-  }
-  return { out, xi, alpha, ratio };
+  for (let i = 0; i < w * h; i++) out[i] = Math.max(0, Math.min(255, Math.round(enhF[i] * 255)));
+  return { out, xi, alpha, gheU8 };
 }
 
 /* === LAB 4: Noise & Filters === */
@@ -1853,7 +1895,7 @@ const state = {
   codeTab: 'main',
   lab1: { tiles: 8 },
   lab2: { preShift: 0, showGHE: false },
-  lab3: { alphaBoost: 1.0 },
+  lab3: { alphaBoost: 1.0, svdRank: 20 },
   lab4: { noiseType: 'gaussian', noiseLevel: 0.02, filterType: 'average', maskSize: 3 },
   lab5: { maskType: 8, sharpenAlpha: 1.0, showSharpened: false, edgeThreshold: 0.05 },
   lab6: { sobelT: 0.18, sigma: 1.0, low: 0.15, high: 0.25, view: 'edges' },
@@ -2445,11 +2487,24 @@ function renderLab3() {
   const slide = buildLabFrame(3);
 
   const stageL = el('div', { class: 'stage-l' });
-  const imgs = el('div', { class: 'imgs g3' });
+  const imgs = el('div', { class: 'imgs g4' });
   imgs.appendChild(imgFrame('l3-orig', 'Original', false, '—'));
   imgs.appendChild(imgFrame('l3-ghe', 'GHE Reference', false, '—'));
   imgs.appendChild(imgFrame('l3-out', 'DCT-SVD', true, '—'));
+  imgs.appendChild(imgFrame('l3-diff', 'Difference ×3', false, '—'));
   stageL.appendChild(imgs);
+
+  const histCard = card();
+  histCard.appendChild(cardHdr('Histogram Distributions'));
+  const histRow = el('div', { class: 'hist-row g3' });
+  ['l3-h-orig','l3-h-ghe','l3-h-enh'].forEach((id, i) => {
+    const h = el('div', { class: 'hist' });
+    h.appendChild(el('div', { class: 'hist-lbl' }, ['ORIGINAL','GHE','DCT-SVD'][i]));
+    h.appendChild(el('canvas', { id }));
+    histRow.appendChild(h);
+  });
+  histCard.appendChild(histRow);
+  stageL.appendChild(histCard);
 
   const pipeCard = card();
   pipeCard.appendChild(cardHdr('10-Stage Pipeline'));
@@ -2467,11 +2522,18 @@ function renderLab3() {
   // RIGHT
   const stageR = el('div', { class: 'stage-r' });
   const ctrlCard = card();
-  ctrlCard.appendChild(cardHdr('Live Control'));
+  ctrlCard.appendChild(cardHdr('Live Controls'));
+  let _l3Timer = null;
+  const debounceLab3 = (fn) => { clearTimeout(_l3Timer); _l3Timer = setTimeout(fn, 120); };
   ctrlCard.appendChild(slider({
     label: 'α Boost Factor', min: 0.5, max: 2.0, step: 0.05, value: state.lab3.alphaBoost,
     fmt: v => v.toFixed(2),
-    onChange: v => { state.lab3.alphaBoost = v; computeLab3(); }
+    onChange: v => { state.lab3.alphaBoost = v; debounceLab3(() => computeLab3()); }
+  }));
+  ctrlCard.appendChild(slider({
+    label: 'SVD Rank (0 = Full)', min: 0, max: 100, step: 1, value: state.lab3.svdRank,
+    fmt: v => v === 0 ? 'Full' : String(v),
+    onChange: v => { state.lab3.svdRank = v; debounceLab3(() => computeLab3()); }
   }));
   stageR.appendChild(ctrlCard);
 
@@ -2490,6 +2552,16 @@ function renderLab3() {
   ambeCard.appendChild(grid);
   stageR.appendChild(ambeCard);
 
+  const insightCard = card();
+  insightCard.appendChild(cardHdr('Insight'));
+  const bl = el('div', { style: 'padding:0 16px 16px;display:flex;flex-direction:column;gap:6px;font-size:13px;color:#94a3b8' });
+  ['<strong>B1</strong> (low-freq illumination) is enhanced via SVD correction',
+   '<strong>B2, B3, B4</strong> (high-freq detail) are preserved exactly',
+   'Full DCT matrix is reconstructed before IDCT — no downsampling'
+  ].forEach(t => bl.appendChild(el('div', { html: '• ' + t })));
+  insightCard.appendChild(bl);
+  stageR.appendChild(insightCard);
+
   slide.appendChild(labBody(stageL, stageR));
   c.appendChild(slide);
   computeLab3();
@@ -2497,25 +2569,37 @@ function renderLab3() {
 
 function computeLab3() {
   const src = state.source;
-  const r = dctSvdEnhance(src, state.w, state.h, state.lab3.alphaBoost);
-  const gheImg = ghe(src);  // Compute GHE separately for the reference panel
+  const r = dctSvdEnhance(src, state.w, state.h, state.lab3.alphaBoost, state.lab3.svdRank);
+  const gheImg = r.gheU8;
   renderToCanvas(document.getElementById('l3-orig'), src, state.w, state.h);
   renderToCanvas(document.getElementById('l3-ghe'), gheImg, state.w, state.h);
   renderToCanvas(document.getElementById('l3-out'), r.out, state.w, state.h);
+  // Difference image (×3 amplification)
+  const diffImg = new Uint8ClampedArray(src.length);
+  for (let i = 0; i < src.length; i++) diffImg[i] = Math.min(255, Math.abs(r.out[i] - src[i]) * 3);
+  renderToCanvas(document.getElementById('l3-diff'), diffImg, state.w, state.h);
   const sO = meanStd(src), sG = meanStd(gheImg), sE = meanStd(r.out);
   document.getElementById('l3-orig-meta').textContent = 'μ=' + sO.mean.toFixed(1) + '  σ=' + sO.std.toFixed(1);
   document.getElementById('l3-ghe-meta').textContent = 'μ=' + sG.mean.toFixed(1) + '  σ=' + sG.std.toFixed(1);
   document.getElementById('l3-out-meta').textContent = 'μ=' + sE.mean.toFixed(1) + '  σ=' + sE.std.toFixed(1);
+  document.getElementById('l3-diff-meta').textContent = 'Δ amplified ×3';
   document.getElementById('l3-xi').textContent = r.xi.toFixed(4);
   document.getElementById('l3-xi-note').textContent = 'α=' + r.alpha.toFixed(4);
+  // Histograms
+  drawHistogramCurve(document.getElementById('l3-h-orig'), histogram(src), '#a855f7');
+  drawHistogramCurve(document.getElementById('l3-h-ghe'), histogram(gheImg), '#a855f7');
+  drawHistogramCurve(document.getElementById('l3-h-enh'), histogram(r.out), '#a855f7');
   const ambe = Math.abs(sE.mean - sO.mean);
   const sg = document.getElementById('l3-stats');
   sg.innerHTML = '';
   sg.appendChild(statCard('AMBE', ambe.toFixed(2), { color: 'accent', full: true }));
+  sg.appendChild(statCard('Original μ', sO.mean.toFixed(2)));
   sg.appendChild(statCard('Original σ', sO.std.toFixed(2)));
+  sg.appendChild(statCard('GHE μ', sG.mean.toFixed(2), { color: 'amber' }));
   sg.appendChild(statCard('GHE σ', sG.std.toFixed(2), { color: 'amber' }));
+  sg.appendChild(statCard('Enhanced μ', sE.mean.toFixed(2), { color: 'accent' }));
   sg.appendChild(statCard('Enhanced σ', sE.std.toFixed(2), { color: 'accent' }));
-  sg.appendChild(statCard('Δσ vs Orig', '+' + (sE.std - sO.std).toFixed(2), { color: 'emer' }));
+  sg.appendChild(statCard('Δσ vs Orig', (sE.std > sO.std ? '+' : '') + (sE.std - sO.std).toFixed(2), { color: 'emer' }));
 }
 
 /* ============================================================
@@ -3247,6 +3331,7 @@ function loadCustomImage(file) {
       const data = ctx.getImageData(0, 0, IMG_SIZE, IMG_SIZE).data;
       state.source = rgbaToGrayscale(data, IMG_SIZE, IMG_SIZE);
       state.w = IMG_SIZE; state.h = IMG_SIZE;
+      _lab3Cache = null; // invalidate DCT/SVD cache for new image
       renderCurrent();
     };
     img.src = e.target.result;
